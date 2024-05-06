@@ -1,26 +1,14 @@
-# virtVNC
+# virt-vnc
 
-[noVNC](https://github.com/novnc/noVNC) for [kubevirt](https://github.com/kubevirt/kubevirt)
+作为梧桐平台虚拟机服务 vnc 连接的前端，基于 noVNC 和 kubevirt 实现。
 
-## Deploy
+## 目标
 
-```bash
-kubectl apply -f https://github.com/wavezhang/virtVNC/raw/master/k8s/virtvnc.yaml
-```
+在梧桐平台中，用户可以通过浏览器直接连接到虚拟机的图形界面，实现虚拟机的图形化操作。
 
-## Usage
+## 思路
 
-1. Get node port of ```virtvnc``` service
-```bash
-kubectl get svc -n kubevirt virtvnc
-```
-2. Visit following url in browser
-```
-http://NODEIP:NODEPORT/
-```
+1. wt-api 检测 kubevirt 资源安装后，自动安装 virt-vnc 服务；
+2. 用户安装虚拟机后，可以通过 vnc 连接进入虚拟机的图形界面。
 
-If you want manager virtual machines in other namespace, you can specify namespace using query param namespace like following:
-```
-http://NODEIP:NODEPORT/?namespace=test
-```
-![virtVNC](https://github.com/wavezhang/virtVNC/blob/master/virtvnc.gif?raw=true)
+vnc 服务代理地址：<http://wt-api/vnc_lite.html?path=k8s/apis/subresources.kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/{vm}}/vnc>

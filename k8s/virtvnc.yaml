@@ -9,9 +9,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: virtvnc
 subjects:
-- kind: ServiceAccount
-  name: virtvnc
-  namespace: kubevirt
+  - kind: ServiceAccount
+    name: virtvnc
+    namespace: kubevirt
 roleRef:
   kind: ClusterRole
   name: virtvnc
@@ -22,25 +22,25 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: virtvnc
 rules:
-- apiGroups:
-  - subresources.kubevirt.io
-  resources:
-  - virtualmachineinstances/console
-  - virtualmachineinstances/vnc
-  verbs:
-  - get
-- apiGroups:
-  - kubevirt.io
-  resources:
-  - virtualmachines
-  - virtualmachineinstances
-  - virtualmachineinstancepresets
-  - virtualmachineinstancereplicasets
-  - virtualmachineinstancemigrations
-  verbs:
-  - get
-  - list
-  - watch
+  - apiGroups:
+      - subresources.kubevirt.io
+    resources:
+      - virtualmachineinstances/console
+      - virtualmachineinstances/vnc
+    verbs:
+      - get
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachines
+      - virtualmachineinstances
+      - virtualmachineinstancepresets
+      - virtualmachineinstancereplicasets
+      - virtualmachineinstancemigrations
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: v1
 kind: Service
@@ -51,9 +51,9 @@ metadata:
   namespace: kubevirt
 spec:
   ports:
-  - port: 8001
-    protocol: TCP
-    targetPort: 8001
+    - port: 8001
+      protocol: TCP
+      targetPort: 8001
   selector:
     app: virtvnc
   type: NodePort
@@ -75,22 +75,22 @@ spec:
     spec:
       serviceAccountName: virtvnc
       nodeSelector:
-        node-role.kubernetes.io/master: ''
-      tolerations: 
-      - key: "node-role.kubernetes.io/master"
-        operator: "Equal"
-        value: ""
-        effect: "NoSchedule"
+        node-role.kubernetes.io/master: ""
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Equal"
+          value: ""
+          effect: "NoSchedule"
       containers:
-      - name: virtvnc
-        image: quay.io/samblade/virtvnc:v0.1
-        livenessProbe:
-          httpGet:
-            port: 8001
-            path: /
-            scheme: HTTP
-          failureThreshold: 30
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          successThreshold: 1
-          timeoutSeconds: 5
+        - name: virtvnc
+          image: swr.cn-southwest-2.myhuaweicloud.com/wutong/virt-vnc:v0.1.0
+          livenessProbe:
+            httpGet:
+              port: 8001
+              path: /
+              scheme: HTTP
+            failureThreshold: 30
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
