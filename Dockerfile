@@ -1,5 +1,3 @@
-FROM swr.cn-southwest-2.myhuaweicloud.com/wutong/nginx:latest
-
-COPY dist/ /usr/share/nginx/html/
-
-CMD  nginx -g 'daemon off;'
+FROM bitnami/kubectl:1.30
+COPY static /static
+CMD ["proxy", "--www=/static", "--accept-hosts=^.*$", "--address=[::]", "--api-prefix=/k8s/", "--www-prefix="]
