@@ -11,4 +11,4 @@
 1. wt-api 检测 kubevirt 资源安装后，自动安装 virt-vnc 服务；
 2. 用户安装虚拟机后，可以通过 vnc 连接进入虚拟机的图形界面。
 
-vnc 服务代理地址：<http://wt-api/vnc_lite.html?path=k8s/apis/subresources.kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/{vm}/vnc>
+vnc 服务代理地址：<http://wt-api/console/virt-vnc/{namespace}/{vm}/vnc.html>
