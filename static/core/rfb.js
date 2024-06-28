@@ -406,6 +406,7 @@ export default class RFB extends EventTargetMixin {
     }
 
     clipboardPasteFrom(text) {
+        console.log(test,'====>paste')
         if (this._rfb_connection_state !== 'connected' || this._viewOnly) { return; }
         RFB.messages.clientCutText(this._sock, text);
     }

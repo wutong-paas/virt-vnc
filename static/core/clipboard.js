@@ -15,6 +15,7 @@ export default class Clipboard {
   // ===== PRIVATE METHODS =====
 
   _handleCopy(e) {
+    console.log(e, e.clipboardData.getData("text/plain"),'===>copy');
     if (navigator.clipboard.writeText) {
       navigator.clipboard
         .writeText(e.clipboardData.getData("text/plain"))
