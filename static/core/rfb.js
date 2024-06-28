@@ -11,6 +11,7 @@ import * as Log from './util/logging.js';
 import { decodeUTF8 } from './util/strings.js';
 import { dragThreshold } from './util/browser.js';
 import EventTargetMixin from './util/eventtarget.js';
+import Clipboard from "./clipboard.js";
 import Display from "./display.js";
 import Keyboard from "./input/keyboard.js";
 import Mouse from "./input/mouse.js";
@@ -35,222 +36,236 @@ const DEFAULT_BACKGROUND = 'rgb(40, 40, 40)';
 
 export default class RFB extends EventTargetMixin {
     constructor(target, url, options) {
-        if (!target) {
-            throw new Error("Must specify target");
+      if (!target) {
+        throw new Error("Must specify target");
+      }
+      if (!url) {
+        throw new Error("Must specify URL");
+      }
+
+      super();
+
+      this._target = target;
+      this._url = url;
+
+      // Connection details
+      options = options || {};
+      this._rfb_credentials = options.credentials || {};
+      this._shared = "shared" in options ? !!options.shared : true;
+      this._repeaterID = options.repeaterID || "";
+      this._wsProtocols = options.wsProtocols || [];
+
+      // Internal state
+      this._rfb_connection_state = "";
+      this._rfb_init_state = "";
+      this._rfb_auth_scheme = -1;
+      this._rfb_clean_disconnect = true;
+
+      // Server capabilities
+      this._rfb_version = 0;
+      this._rfb_max_version = 3.8;
+      this._rfb_tightvnc = false;
+      this._rfb_xvp_ver = 0;
+
+      this._fb_width = 0;
+      this._fb_height = 0;
+
+      this._fb_name = "";
+
+      this._capabilities = { power: false };
+
+      this._supportsFence = false;
+
+      this._supportsContinuousUpdates = false;
+      this._enabledContinuousUpdates = false;
+
+      this._supportsSetDesktopSize = false;
+      this._screen_id = 0;
+      this._screen_flags = 0;
+
+      this._qemuExtKeyEventSupported = false;
+
+      // Internal objects
+      this._sock = null; // Websock object
+      this._display = null; // Display object
+      this._flushing = false; // Display flushing state
+      this._keyboard = null; // Keyboard input handler object
+      this._mouse = null; // Mouse input handler object
+
+      // Timers
+      this._disconnTimer = null; // disconnection timer
+      this._resizeTimeout = null; // resize rate limiting
+
+      // Decoder states
+      this._decoders = {};
+
+      this._FBU = {
+        rects: 0,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        encoding: null,
+      };
+
+      // Mouse state
+      this._mouse_buttonMask = 0;
+      this._mouse_arr = [];
+      this._viewportDragging = false;
+      this._viewportDragPos = {};
+      this._viewportHasMoved = false;
+
+      // clipboard
+      this._clipboard = null;
+
+      // Bound event handlers
+      this._eventHandlers = {
+        focusCanvas: this._focusCanvas.bind(this),
+        windowResize: this._windowResize.bind(this),
+      };
+
+      // main setup
+      Log.Debug(">> RFB.constructor");
+
+      // Create DOM elements
+      this._screen = document.createElement("div");
+      this._screen.style.display = "flex";
+      this._screen.style.width = "100%";
+      this._screen.style.height = "100%";
+      this._screen.style.overflow = "auto";
+      this._screen.style.background = DEFAULT_BACKGROUND;
+      this._canvas = document.createElement("canvas");
+      this._canvas.style.margin = "auto";
+      // Some browsers add an outline on focus
+      this._canvas.style.outline = "none";
+      // IE miscalculates width without this :(
+      this._canvas.style.flexShrink = "0";
+      this._canvas.width = 0;
+      this._canvas.height = 0;
+      this._canvas.tabIndex = -1;
+      this._screen.appendChild(this._canvas);
+
+      // Cursor
+      this._cursor = new Cursor();
+
+      // XXX: TightVNC 2.8.11 sends no cursor at all until Windows changes
+      // it. Result: no cursor at all until a window border or an edit field
+      // is hit blindly. But there are also VNC servers that draw the cursor
+      // in the framebuffer and don't send the empty local cursor. There is
+      // no way to satisfy both sides.
+      //
+      // The spec is unclear on this "initial cursor" issue. Many other
+      // viewers (TigerVNC, RealVNC, Remmina) display an arrow as the
+      // initial cursor instead.
+      this._cursorImage = RFB.cursors.none;
+
+      // populate decoder array with objects
+      this._decoders[encodings.encodingRaw] = new RawDecoder();
+      this._decoders[encodings.encodingCopyRect] = new CopyRectDecoder();
+      this._decoders[encodings.encodingRRE] = new RREDecoder();
+      this._decoders[encodings.encodingHextile] = new HextileDecoder();
+      this._decoders[encodings.encodingTight] = new TightDecoder();
+      this._decoders[encodings.encodingTightPNG] = new TightPNGDecoder();
+
+      // NB: nothing that needs explicit teardown should be done
+      // before this point, since this can throw an exception
+      try {
+        this._display = new Display(this._canvas);
+      } catch (exc) {
+        Log.Error("Display exception: " + exc);
+        throw exc;
+      }
+      this._display.onflush = this._onFlush.bind(this);
+
+      // 实例化剪切板
+      this._clipboard = new Clipboard(this._canvas);
+      this._clipboard.onpaste = this.clipboardPasteFrom.bind(this);
+
+      this._keyboard = new Keyboard(this._canvas);
+      this._keyboard.onkeyevent = this._handleKeyEvent.bind(this);
+
+      this._mouse = new Mouse(this._canvas);
+      this._mouse.onmousebutton = this._handleMouseButton.bind(this);
+      this._mouse.onmousemove = this._handleMouseMove.bind(this);
+
+      this._sock = new Websock();
+      this._sock.on("message", () => {
+        this._handle_message();
+      });
+      this._sock.on("open", () => {
+        if (
+          this._rfb_connection_state === "connecting" &&
+          this._rfb_init_state === ""
+        ) {
+          this._rfb_init_state = "ProtocolVersion";
+          Log.Debug("Starting VNC handshake");
+        } else {
+          this._fail(
+            "Unexpected server connection while " + this._rfb_connection_state
+          );
         }
-        if (!url) {
-            throw new Error("Must specify URL");
+      });
+      this._sock.on("close", (e) => {
+        Log.Debug("WebSocket on-close event");
+        let msg = "";
+        if (e.code) {
+          msg = "(code: " + e.code;
+          if (e.reason) {
+            msg += ", reason: " + e.reason;
+          }
+          msg += ")";
         }
-
-        super();
-
-        this._target = target;
-        this._url = url;
-
-        // Connection details
-        options = options || {};
-        this._rfb_credentials = options.credentials || {};
-        this._shared = 'shared' in options ? !!options.shared : true;
-        this._repeaterID = options.repeaterID || '';
-        this._wsProtocols = options.wsProtocols || [];
-
-        // Internal state
-        this._rfb_connection_state = '';
-        this._rfb_init_state = '';
-        this._rfb_auth_scheme = -1;
-        this._rfb_clean_disconnect = true;
-
-        // Server capabilities
-        this._rfb_version = 0;
-        this._rfb_max_version = 3.8;
-        this._rfb_tightvnc = false;
-        this._rfb_xvp_ver = 0;
-
-        this._fb_width = 0;
-        this._fb_height = 0;
-
-        this._fb_name = "";
-
-        this._capabilities = { power: false };
-
-        this._supportsFence = false;
-
-        this._supportsContinuousUpdates = false;
-        this._enabledContinuousUpdates = false;
-
-        this._supportsSetDesktopSize = false;
-        this._screen_id = 0;
-        this._screen_flags = 0;
-
-        this._qemuExtKeyEventSupported = false;
-
-        // Internal objects
-        this._sock = null;              // Websock object
-        this._display = null;           // Display object
-        this._flushing = false;         // Display flushing state
-        this._keyboard = null;          // Keyboard input handler object
-        this._mouse = null;             // Mouse input handler object
-
-        // Timers
-        this._disconnTimer = null;      // disconnection timer
-        this._resizeTimeout = null;     // resize rate limiting
-
-        // Decoder states
-        this._decoders = {};
-
-        this._FBU = {
-            rects: 0,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            encoding: null,
-        };
-
-        // Mouse state
-        this._mouse_buttonMask = 0;
-        this._mouse_arr = [];
-        this._viewportDragging = false;
-        this._viewportDragPos = {};
-        this._viewportHasMoved = false;
-
-        // Bound event handlers
-        this._eventHandlers = {
-            focusCanvas: this._focusCanvas.bind(this),
-            windowResize: this._windowResize.bind(this),
-        };
-
-        // main setup
-        Log.Debug(">> RFB.constructor");
-
-        // Create DOM elements
-        this._screen = document.createElement('div');
-        this._screen.style.display = 'flex';
-        this._screen.style.width = '100%';
-        this._screen.style.height = '100%';
-        this._screen.style.overflow = 'auto';
-        this._screen.style.background = DEFAULT_BACKGROUND;
-        this._canvas = document.createElement('canvas');
-        this._canvas.style.margin = 'auto';
-        // Some browsers add an outline on focus
-        this._canvas.style.outline = 'none';
-        // IE miscalculates width without this :(
-        this._canvas.style.flexShrink = '0';
-        this._canvas.width = 0;
-        this._canvas.height = 0;
-        this._canvas.tabIndex = -1;
-        this._screen.appendChild(this._canvas);
-
-        // Cursor
-        this._cursor = new Cursor();
-
-        // XXX: TightVNC 2.8.11 sends no cursor at all until Windows changes
-        // it. Result: no cursor at all until a window border or an edit field
-        // is hit blindly. But there are also VNC servers that draw the cursor
-        // in the framebuffer and don't send the empty local cursor. There is
-        // no way to satisfy both sides.
-        //
-        // The spec is unclear on this "initial cursor" issue. Many other
-        // viewers (TigerVNC, RealVNC, Remmina) display an arrow as the
-        // initial cursor instead.
-        this._cursorImage = RFB.cursors.none;
-
-        // populate decoder array with objects
-        this._decoders[encodings.encodingRaw] = new RawDecoder();
-        this._decoders[encodings.encodingCopyRect] = new CopyRectDecoder();
-        this._decoders[encodings.encodingRRE] = new RREDecoder();
-        this._decoders[encodings.encodingHextile] = new HextileDecoder();
-        this._decoders[encodings.encodingTight] = new TightDecoder();
-        this._decoders[encodings.encodingTightPNG] = new TightPNGDecoder();
-
-        // NB: nothing that needs explicit teardown should be done
-        // before this point, since this can throw an exception
-        try {
-            this._display = new Display(this._canvas);
-        } catch (exc) {
-            Log.Error("Display exception: " + exc);
-            throw exc;
+        switch (this._rfb_connection_state) {
+          case "connecting":
+            this._fail("Connection closed " + msg);
+            break;
+          case "connected":
+            // Handle disconnects that were initiated server-side
+            this._updateConnectionState("disconnecting");
+            this._updateConnectionState("disconnected");
+            break;
+          case "disconnecting":
+            // Normal disconnection path
+            this._updateConnectionState("disconnected");
+            break;
+          case "disconnected":
+            this._fail(
+              "Unexpected server disconnect " +
+                "when already disconnected " +
+                msg
+            );
+            break;
+          default:
+            this._fail("Unexpected server disconnect before connecting " + msg);
+            break;
         }
-        this._display.onflush = this._onFlush.bind(this);
+        this._sock.off("close");
+      });
+      this._sock.on("error", (e) => Log.Warn("WebSocket on-error event"));
 
-        this._keyboard = new Keyboard(this._canvas);
-        this._keyboard.onkeyevent = this._handleKeyEvent.bind(this);
+      // Slight delay of the actual connection so that the caller has
+      // time to set up callbacks
+      setTimeout(this._updateConnectionState.bind(this, "connecting"));
 
-        this._mouse = new Mouse(this._canvas);
-        this._mouse.onmousebutton = this._handleMouseButton.bind(this);
-        this._mouse.onmousemove = this._handleMouseMove.bind(this);
+      Log.Debug("<< RFB.constructor");
 
-        this._sock = new Websock();
-        this._sock.on('message', () => {
-            this._handle_message();
-        });
-        this._sock.on('open', () => {
-            if ((this._rfb_connection_state === 'connecting') &&
-                (this._rfb_init_state === '')) {
-                this._rfb_init_state = 'ProtocolVersion';
-                Log.Debug("Starting VNC handshake");
-            } else {
-                this._fail("Unexpected server connection while " +
-                           this._rfb_connection_state);
-            }
-        });
-        this._sock.on('close', (e) => {
-            Log.Debug("WebSocket on-close event");
-            let msg = "";
-            if (e.code) {
-                msg = "(code: " + e.code;
-                if (e.reason) {
-                    msg += ", reason: " + e.reason;
-                }
-                msg += ")";
-            }
-            switch (this._rfb_connection_state) {
-                case 'connecting':
-                    this._fail("Connection closed " + msg);
-                    break;
-                case 'connected':
-                    // Handle disconnects that were initiated server-side
-                    this._updateConnectionState('disconnecting');
-                    this._updateConnectionState('disconnected');
-                    break;
-                case 'disconnecting':
-                    // Normal disconnection path
-                    this._updateConnectionState('disconnected');
-                    break;
-                case 'disconnected':
-                    this._fail("Unexpected server disconnect " +
-                               "when already disconnected " + msg);
-                    break;
-                default:
-                    this._fail("Unexpected server disconnect before connecting " +
-                               msg);
-                    break;
-            }
-            this._sock.off('close');
-        });
-        this._sock.on('error', e => Log.Warn("WebSocket on-error event"));
+      // ===== PROPERTIES =====
 
-        // Slight delay of the actual connection so that the caller has
-        // time to set up callbacks
-        setTimeout(this._updateConnectionState.bind(this, 'connecting'));
+      this.dragViewport = false;
+      this.focusOnClick = true;
 
-        Log.Debug("<< RFB.constructor");
+      this._viewOnly = false;
+      this._clipViewport = false;
+      this._scaleViewport = false;
+      this._resizeSession = false;
 
-        // ===== PROPERTIES =====
-
-        this.dragViewport = false;
-        this.focusOnClick = true;
-
-        this._viewOnly = false;
-        this._clipViewport = false;
-        this._scaleViewport = false;
-        this._resizeSession = false;
-
-        this._showDotCursor = false;
-        if (options.showDotCursor !== undefined) {
-            Log.Warn("Specifying showDotCursor as a RFB constructor argument is deprecated");
-            this._showDotCursor = options.showDotCursor;
-        }
+      this._showDotCursor = false;
+      if (options.showDotCursor !== undefined) {
+        Log.Warn(
+          "Specifying showDotCursor as a RFB constructor argument is deprecated"
+        );
+        this._showDotCursor = options.showDotCursor;
+      }
     }
 
     // ===== PROPERTIES =====
@@ -264,9 +279,11 @@ export default class RFB extends EventTargetMixin {
             if (viewOnly) {
                 this._keyboard.ungrab();
                 this._mouse.ungrab();
+                this._clipboard.ungrab();
             } else {
                 this._keyboard.grab();
                 this._mouse.grab();
+                this._clipboard.grab();
             }
         }
     }
@@ -1199,7 +1216,11 @@ export default class RFB extends EventTargetMixin {
         this._resize(width, height);
 
         if (!this._viewOnly) { this._keyboard.grab(); }
-        if (!this._viewOnly) { this._mouse.grab(); }
+        if (!this._viewOnly) { 
+           this._keyboard.grab();
+           this._mouse.grab();
+           this._clipboard.grab();
+        }
 
         this._fb_depth = 24;
 
@@ -1308,9 +1329,22 @@ export default class RFB extends EventTargetMixin {
 
         if (this._viewOnly) { return true; }
 
-        this.dispatchEvent(new CustomEvent(
-            "clipboard",
-            { detail: { text: text } }));
+        // this.dispatchEvent(new CustomEvent(
+        //     "clipboard",
+        //     { detail: { text: text } }));
+
+        // clipboard modified by leon
+         this.dispatchEvent(
+           new CustomEvent("clipboard", { detail: { text: text } })
+         );
+
+         if (Clipboard.isSupported) {
+           const clipboardData = new DataTransfer();
+           clipboardData.setData("text/plain", text);
+           this._canvas.dispatchEvent(
+             new ClipboardEvent("copy", { clipboardData })
+           );
+         }
 
         return true;
     }
